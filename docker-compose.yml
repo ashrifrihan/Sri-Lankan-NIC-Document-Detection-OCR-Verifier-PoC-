@@ -1,0 +1,19 @@
+services:
+  verifier:
+    build: ./backend
+    ports:
+      - "${NIC_BIND_IP:-127.0.0.1}:${NIC_HOST_PORT:-8000}:${PORT:-8000}"
+    environment:
+      PORT: "${PORT:-8000}"
+      WEB_WORKERS: "${WEB_WORKERS:-1}"
+      BOOKINGPARTNER_API_KEY: "${BOOKINGPARTNER_API_KEY:-}"
+      BOOKINGPARTNER_PREVIOUS_API_KEY: "${BOOKINGPARTNER_PREVIOUS_API_KEY:-}"
+      OCR_BACKEND: "${OCR_BACKEND:-paddle}"
+      NIC_DETECTOR_WEIGHTS: "${NIC_DETECTOR_WEIGHTS:-}"
+      NIC_CLASSIFIER_WEIGHTS: "${NIC_CLASSIFIER_WEIGHTS:-}"
+    healthcheck:
+      test: ["CMD", "python", "-c", "from os import environ; from urllib.request import urlopen; urlopen('http://127.0.0.1:' + environ['PORT'] + '/api/health', timeout=5).close()"]
+      interval: 30s
+      timeout: 6s
+      start_period: 120s
+    restart: unless-stopped

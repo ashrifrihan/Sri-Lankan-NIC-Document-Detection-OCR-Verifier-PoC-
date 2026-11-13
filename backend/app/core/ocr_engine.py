@@ -74,6 +74,15 @@ class OCREngine:
                     return backend.name, lines
             return available or "Unavailable", []
 
+    def warmup(self):
+        image = np.full((128, 480, 3), 255, dtype=np.uint8)
+        cv2.putText(image, "OCR WARMUP", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.7, (0, 0, 0), 3)
+        self._recognize(image)
+
+    @property
+    def loaded_backends(self):
+        return [backend.name for backend in self._backends.copy().values() if backend is not None]
+
     def detect_scripts(self, text: str) -> Dict[str, bool]:
         """Detects presence of Latin, Sinhala, or Tamil characters in extracted text."""
         return {

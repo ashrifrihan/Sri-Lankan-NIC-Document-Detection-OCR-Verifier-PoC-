@@ -1,0 +1,9 @@
+*
+!app/
+!app/**/*.py
+!requirements*.txt
+!gunicorn.conf.py
+!model-weights/
+!model-weights/README.md
+!model-weights/detector.pt
+!model-weights/classifier.pt

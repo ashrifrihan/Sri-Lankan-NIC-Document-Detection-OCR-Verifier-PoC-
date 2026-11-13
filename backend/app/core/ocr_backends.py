@@ -31,8 +31,9 @@ class PaddleBackend:
         from paddleocr import PaddleOCR
 
         self.model = PaddleOCR(
-            lang=self.languages, ocr_version="PP-OCRv5", device="cpu",
+            device="cpu", enable_mkldnn=False,
             text_detection_model_name="PP-OCRv5_mobile_det",
+            text_recognition_model_name="en_PP-OCRv5_mobile_rec",
             use_doc_orientation_classify=False, use_doc_unwarping=False,
             use_textline_orientation=False,
         )
@@ -80,6 +81,8 @@ class TesseractBackend:
         try:
             self.api.SetImage(Image.fromarray(pixels))
             self.api.Recognize()
+            if not (self.api.GetUTF8Text() or "").strip():
+                return []
             iterator = self.api.GetIterator()
             if iterator is None:
                 return []

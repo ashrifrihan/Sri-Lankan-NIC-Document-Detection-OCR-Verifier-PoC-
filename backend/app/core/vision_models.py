@@ -39,6 +39,15 @@ class VisionModels:
         self.lock = Lock()
         self.models = {}
 
+    def warmup(self):
+        for kind, path in (("detector", settings.NIC_DETECTOR_WEIGHTS),
+                           ("classifier", settings.NIC_CLASSIFIER_WEIGHTS)):
+            if path:
+                try:
+                    self._load(kind, path)
+                except Exception as error:
+                    logger.warning("Vision model %s could not initialize (%s)", kind, type(error).__name__)
+
     def _load(self, kind, path):
         if kind not in self.models:
             if not Path(path).is_file():

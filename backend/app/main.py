@@ -1,5 +1,6 @@
 import uuid
 from collections import deque
+from contextlib import asynccontextmanager
 from secrets import compare_digest
 from threading import Lock
 from time import monotonic
@@ -8,10 +9,15 @@ from typing import Optional
 from fastapi import Depends, FastAPI, Header, UploadFile, File, Form, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.formparsers import MultiPartParser
 
 from .config import settings
+from .http_limits import UploadBodyLimit, api_error
 from .utils.privacy import get_sanitized_logger
 from .models.schemas import (
     VerificationResponse,
@@ -29,6 +35,7 @@ from .core.classifier import classify_sri_lankan_nic
 from .core.nic_parser import parse_sri_lankan_nic
 from .core.matcher import compare_nic, compare_dob, compare_names
 from .core.local_model import local_model
+from .core.vision_models import vision_models
 
 logger = get_sanitized_logger("main")
 # SpooledTemporaryFile treats zero as disabling automatic disk rollover.
@@ -38,34 +45,53 @@ booking_requests = deque()
 booking_lock = Lock()
 booking_in_flight: set[str] = set()
 
+
+@asynccontextmanager
+async def lifespan(_app):
+    if settings.OCR_WARMUP:
+        await run_in_threadpool(ocr_service.warmup)
+        await run_in_threadpool(vision_models.warmup)
+    yield
+
+
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
-    description="Sri Lankan NIC Document Detection and OCR Testing Proof of Concept"
+    description="Sri Lankan NIC Document Detection and OCR Testing Proof of Concept",
+    lifespan=lifespan,
 )
 
-# Restrict CORS to localhost
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
-)
+@app.exception_handler(StarletteHTTPException)
+async def http_error(_request, error):
+    return api_error(error.status_code, error.detail, error.headers)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(_request, _error):
+    return api_error(422, "Request fields are missing or invalid.")
+
 
 @app.get("/api/health")
 def health_check():
     """System health check and OCR engine status."""
     engine = ocr_service.active_engine
-    return {
-        "status": "healthy",
+    ready = engine is not None
+    payload = {
+        "status": "unavailable" if settings.OCR_WARMUP and not ready else "healthy",
+        "ocr_ready": ready,
         "app_name": settings.APP_NAME,
         "version": settings.APP_VERSION,
         "ocr_engine": engine.name if engine else "Not initialized",
         "ocr_language": engine.languages if engine else None,
         "ocr_backend_config": settings.OCR_BACKEND,
+        "models_loaded": {
+            "ocr": ocr_service.loaded_backends,
+            "detector": "detector" in vision_models.models,
+            "classifier": "classifier" in vision_models.models,
+        },
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
+    return JSONResponse(payload, status_code=503) if payload["status"] == "unavailable" else payload
 
 @app.post("/api/validate-nic", response_model=NICValidationResult)
 def validate_nic_endpoint(payload: ValidateNICRequest):
@@ -93,38 +119,53 @@ def require_bookingpartner_key(x_api_key: str | None = Header(None)):
         raise HTTPException(401, "Invalid API key.")
 
 
-@app.middleware("http")
 async def bookingpartner_upload_limits(request: Request, call_next):
     if request.method == "POST" and request.url.path.rstrip("/") == "/api/v1/bookingpartner/verify":
         try:
             require_bookingpartner_key(request.headers.get("x-api-key"))
         except HTTPException as error:
-            return JSONResponse({"detail": error.detail}, status_code=error.status_code)
-        length = request.headers.get("content-length")
-        if length and length.isdecimal() and int(length) > 2 * settings.MAX_FILE_SIZE_BYTES + 64 * 1024:
-            return JSONResponse({"detail": "Upload is too large."}, status_code=413)
+            return api_error(error.status_code, error.detail)
         upload_id = request.headers.get("idempotency-key")
         if upload_id and (len(upload_id) > 128 or not upload_id.isascii()):
-            return JSONResponse({"detail": "Invalid Idempotency-Key."}, status_code=400)
+            return api_error(400, "Invalid Idempotency-Key.")
         with booking_lock:
             now = monotonic()
             while booking_requests and now - booking_requests[0] >= 60:
                 booking_requests.popleft()
             if len(booking_requests) >= settings.BOOKINGPARTNER_REQUESTS_PER_MINUTE:
-                return JSONResponse({"detail": "Too many uploads."}, status_code=429, headers={"Retry-After": "60"})
+                return api_error(429, "Too many uploads.", headers={"Retry-After": "60"})
             if upload_id and upload_id in booking_in_flight:
-                return JSONResponse({"detail": "This upload is already being processed."}, status_code=409)
+                return api_error(409, "This upload is already being processed.")
             booking_requests.append(now)
             if upload_id:
                 booking_in_flight.add(upload_id)
         try:
-            return await call_next(request)
+            return await dispatch_safely(request, call_next)
         finally:
             if upload_id:
                 with booking_lock:
                     booking_in_flight.discard(upload_id)
-    return await call_next(request)
+    return await dispatch_safely(request, call_next)
 
+
+async def dispatch_safely(request, call_next):
+    try:
+        return await call_next(request)
+    except Exception as error:
+        logger.error("Unhandled request error (%s)", type(error).__name__)
+        return api_error(500, "The server could not complete the request.")
+
+
+# Auth and rate checks run before buffering uploads. CORS wraps early errors.
+app.add_middleware(UploadBodyLimit)
+app.add_middleware(BaseHTTPMiddleware, dispatch=bookingpartner_upload_limits)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 @app.post("/api/train/{request_id}", dependencies=[Depends(require_local_mode)])
 def train_analysis(request_id: uuid.UUID, payload: TrainingFeedback):
@@ -163,7 +204,7 @@ def verify_nic(
     if front_image.content_type not in settings.ALLOWED_MIME_TYPES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported file format '{front_image.content_type}'. Please upload JPEG, PNG, or WebP."
+            detail="Unsupported file format. Please upload JPEG, PNG, or WebP."
         )
 
     front_bytes = front_image.file.read(settings.MAX_FILE_SIZE_BYTES + 1)
@@ -178,7 +219,7 @@ def verify_nic(
         if back_image.content_type not in settings.ALLOWED_MIME_TYPES:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Unsupported back image format '{back_image.content_type}'."
+                detail="Unsupported back image format. Please upload JPEG, PNG, or WebP."
             )
         back_bytes = back_image.file.read(settings.MAX_FILE_SIZE_BYTES + 1)
         if len(back_bytes) > settings.MAX_FILE_SIZE_BYTES:

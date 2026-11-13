@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from pydantic import ConfigDict, SecretStr, field_validator
+from pydantic import ConfigDict, Field, SecretStr, field_validator
 from typing import List, Literal
 
 class Settings(BaseSettings):
@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     HOST: str = "127.0.0.1"
     PORT: int = 8000
+    WEB_WORKERS: int = Field(1, ge=1)
+    OCR_WARMUP: bool = False
     BOOKINGPARTNER_API_KEY: SecretStr | None = None
     BOOKINGPARTNER_PREVIOUS_API_KEY: SecretStr | None = None
     BOOKINGPARTNER_REQUESTS_PER_MINUTE: int = 20
@@ -19,6 +21,8 @@ class Settings(BaseSettings):
     def validate_bookingpartner_key(cls, value):
         if value is not None:
             key = value.get_secret_value()
+            if not key:
+                return None
             if len(key) < 32 or not key.isascii() or not key.isalnum():
                 raise ValueError("Set a random alphanumeric BookingPartner key of at least 32 characters.")
         return value
@@ -31,6 +35,8 @@ class Settings(BaseSettings):
 
     # File limits
     MAX_FILE_SIZE_BYTES: int = 10 * 1024 * 1024  # 10 MB
+    MAX_REQUEST_BODY_BYTES: int = Field(21 * 1024 * 1024, gt=0)
+    MAX_IMAGE_PIXELS: int = Field(24_000_000, gt=0)
     ALLOWED_MIME_TYPES: List[str] = [
         "image/jpeg",
         "image/png",

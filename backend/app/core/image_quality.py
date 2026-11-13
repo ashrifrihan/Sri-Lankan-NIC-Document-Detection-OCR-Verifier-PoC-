@@ -15,9 +15,11 @@ def assess_image_quality(image_bytes: bytes) -> ImageQualityAssessment:
 
     # Read with Pillow first to verify integrity and dimensions
     try:
-        pil_img = Image.open(io.BytesIO(image_bytes))
-        width, height = pil_img.size
-    except Exception as e:
+        with Image.open(io.BytesIO(image_bytes)) as pil_img:
+            width, height = pil_img.size
+        if width * height > settings.MAX_IMAGE_PIXELS:
+            raise ValueError("Image exceeds pixel limit.")
+    except (OSError, ValueError, Image.DecompressionBombError):
         return ImageQualityAssessment(
             is_acceptable=False,
             blur_score=0.0,

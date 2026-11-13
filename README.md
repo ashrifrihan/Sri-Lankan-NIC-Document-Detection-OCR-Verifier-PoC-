@@ -211,20 +211,56 @@ card type. Install `backend/requirements-vision.txt` and follow the
 Set `NIC_DETECTOR_WEIGHTS` and `NIC_CLASSIFIER_WEIGHTS` to trusted local
 checkpoints. The heuristic pipeline remains available without usable weights.
 
-### BookingPartner integration on AWS
+### Linux Docker and AWS deployment
 
-1. Set up the Linux OCR dependencies above on your test instance. Run OCR on
-   a synthetic NIC with the same backend and runtime that will serve requests.
-2. Run FastAPI as a service without reload. Keep port 8000 private and put it
-   behind an HTTPS endpoint reachable by BookingPartner's backend. If both run
-   in the same VPC, use an internal HTTPS endpoint and restrict ingress to
-   BookingPartner's service. Keep the learned SQLite file on encrypted EBS.
+From the repository root, run `docker compose up -d --build` and check
+`http://127.0.0.1:8000/api/health`. The Compose service publishes FastAPI
+on loopback. Gunicorn uses the Uvicorn worker and starts one worker by default.
+Configure `HOST`, `PORT`, and `WEB_WORKERS` in the container when needed.
+For a native development run, `python run.py` uses the same settings.
+
+The build caches PaddleOCR weights and includes the three Tesseract language
+packs. To bake in your trained vision models, place trusted checkpoints in
+`backend/model-weights/` before building, then set the applicable variables:
+
+```dotenv
+NIC_DETECTOR_WEIGHTS=/srv/verifier/model-weights/detector.pt
+NIC_CLASSIFIER_WEIGHTS=/srv/verifier/model-weights/classifier.pt
+```
+
+The health endpoint reports configured OCR, the active backend, and loaded
+models. Docker enables startup warmup, so health returns HTTP 503 if OCR
+initialization fails entirely. A single worker preserves the process-local
+rate limit and concurrent duplicate checks. Use shared enforcement at the
+gateway or in a shared store before scaling that policy across processes.
+
+1. Start with an x86-64 Linux Lightsail or EC2 instance with Docker Compose.
+   Build the image and run the synthetic smoke test before handling live NICs.
+2. **Lightsail or EC2 with Nginx:** Leave the Docker port on loopback and
+   configure Nginx HTTPS on port 443. Forward only
+   `/api/v1/bookingpartner/verify` to FastAPI. Set `client_max_body_size 21m`,
+   `proxy_request_buffering off`, and `proxy_read_timeout 180s`. Restrict
+   inbound 443 to BookingPartner's egress addresses when available. Keep port
+   8000 closed on the public and private firewall.
+   [Lightsail Nginx HTTPS instructions](https://docs.aws.amazon.com/lightsail/latest/userguide/amazon-lightsail-using-lets-encrypt-certificates-with-nginx.html)
+
+   **EC2 with an ALB:** Use an HTTPS listener with an ACM certificate and an
+   instance target group on port 8000. Set `NIC_BIND_IP` to the instance's
+   private address. Restrict the target security group to inbound traffic
+   from the ALB security group. Use an internal ALB when BookingPartner has
+   private connectivity. Set the health check to `/api/health` and allow
+   sufficient idle timeout for OCR.
+   [ALB security groups](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-update-security-groups.html)
 3. Generate a key with `python -c "import secrets; print(secrets.token_hex(32))"`.
-   Store it in AWS Secrets Manager and give each service access through its
-   runtime role. Set `BOOKINGPARTNER_API_KEY` in the verifier's environment.
+   Store it in AWS Secrets Manager. On EC2, give the instance role access to
+   the specific secret. On Lightsail, retrieve the secret through your
+   deployment identity and inject it into the service environment.
+   Set `BOOKINGPARTNER_API_KEY` for both services without printing it, baking
+   it into the image, or committing it.
    Setting the key enables the BookingPartner endpoint and disables local
    upload and training routes on that instance. Continue training on your
    local installation.
+   [Retrieve a Secrets Manager value](https://docs.aws.amazon.com/secretsmanager/latest/userguide/retrieving-secrets.html)
 4. In a Node.js BookingPartner backend, install `lanka-validations` and use
    `isValidNic` for typed NIC numbers. Send photos from the authenticated
    BookingPartner backend to FastAPI. Keep the key out of browser code and
@@ -265,7 +301,10 @@ Restrict the BookingPartner upload route to authorized users, limit uploads
 to 10 MB per image, and return only the fields needed for the booking flow.
 
 The BookingPartner response contains the request ID, review status, date source,
-and field warnings. During key rotation, set `BOOKINGPARTNER_PREVIOUS_API_KEY`
+match statuses, and field warnings. API errors carry a machine-readable `code`
+and a safe `detail` message. Multipart uploads are capped at 21 MiB total
+and 10 MiB per image by default. Decoded dimensions are capped at 24 megapixels.
+During key rotation, set `BOOKINGPARTNER_PREVIOUS_API_KEY`
 to the outgoing key, deploy the new primary key, update BookingPartner, then
 remove the outgoing key. Use `Idempotency-Key` with a unique value per upload
 attempt to prevent concurrent duplicates. The default limit is 20 uploads per
