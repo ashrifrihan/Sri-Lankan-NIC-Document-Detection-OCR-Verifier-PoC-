@@ -19,7 +19,7 @@ def api_error(status, detail, headers=None):
 class UploadBodyLimit:
     """Bound multipart bodies before Starlette parses them into memory."""
 
-    paths = {"/api/verify", "/api/v1/bookingpartner/verify"}
+    paths = {"/api/verify", "/api/v1/bookingpartner/verify", "/api/scan-barcode"}
 
     def __init__(self, app):
         self.app = app

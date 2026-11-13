@@ -12,6 +12,7 @@ import {
   Laptop
 } from 'lucide-react';
 import { ImageUploader } from '../components/ImageUploader';
+import { BarcodeScanForm } from '../components/BarcodeScanForm';
 import { OwnerForm } from '../components/OwnerForm';
 import { ResultsView } from '../components/ResultsView';
 import { DisclaimerModal } from '../components/DisclaimerModal';
@@ -19,6 +20,7 @@ import { VerificationResponse } from '../lib/types';
 import { verifyNICDocument, checkBackendHealth } from '../lib/api';
 
 export default function Home() {
+  const [mode, setMode] = useState<'photos' | 'barcode'>('photos');
   // Files and previews
   const [frontFile, setFrontFile] = useState<File | null>(null);
   const [frontPreview, setFrontPreview] = useState<string | null>(null);
@@ -186,7 +188,17 @@ export default function Home() {
       </header>
 
       {/* Results View or Form View */}
-      {result ? (
+      <div className="flex flex-wrap gap-2" aria-label="NIC input method">
+        <button type="button" disabled={isLoading} aria-pressed={mode === 'photos'}
+          onClick={() => setMode('photos')} className="rounded-xl border bg-white px-4 py-2 text-sm aria-pressed:bg-slate-900 aria-pressed:text-white">
+          Upload NIC photos
+        </button>
+        <button type="button" disabled={isLoading} aria-pressed={mode === 'barcode'}
+          onClick={() => setMode('barcode')} className="rounded-xl border bg-white px-4 py-2 text-sm aria-pressed:bg-slate-900 aria-pressed:text-white">
+          Scan back barcode
+        </button>
+      </div>
+      {mode === 'barcode' ? <BarcodeScanForm /> : result ? (
         <ResultsView
           result={result}
           frontPreview={frontPreview}

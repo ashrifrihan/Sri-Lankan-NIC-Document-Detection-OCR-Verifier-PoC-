@@ -30,7 +30,8 @@ from .models.schemas import (
     MatchStatus
 )
 from .core.image_quality import assess_image_quality
-from .core.barcode import scan_back_barcode
+from .core.barcode import scan_barcode_details, scan_back_barcode
+from .models.schemas import BarcodeScan
 from .core.ocr_engine import ocr_service
 from .core.classifier import classify_sri_lankan_nic
 from .core.nic_parser import parse_sri_lankan_nic
@@ -179,6 +180,18 @@ def train_analysis(request_id: uuid.UUID, payload: TrainingFeedback):
     if not local_model.learn(str(request_id), confirmed, name):
         raise HTTPException(409, "This result is no longer available for training. Analyze the photo again.")
     return {"saved": True}
+
+@app.post("/api/scan-barcode", response_model=BarcodeScan, dependencies=[Depends(require_local_mode)])
+def scan_barcode(back_image: UploadFile = File(...)):
+    if back_image.content_type not in settings.ALLOWED_MIME_TYPES:
+        raise HTTPException(400, "Choose a JPEG, PNG, or WebP image.")
+    photo = back_image.file.read(settings.MAX_FILE_SIZE_BYTES + 1)
+    if len(photo) > settings.MAX_FILE_SIZE_BYTES:
+        raise HTTPException(413, "The back photo exceeds 10 MB.")
+    if not assess_image_quality(photo).width:
+        raise HTTPException(400, "The back photo could not be opened.")
+    return scan_barcode_details(photo)
+
 
 @app.post("/api/verify", response_model=VerificationResponse, dependencies=[Depends(require_local_mode)])
 def verify_nic(

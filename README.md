@@ -326,6 +326,14 @@ Structured and opaque payloads are reported as decoded with comparison
 unavailable. A mismatch or multiple distinct values triggers a review warning.
 The barcode payload is excluded from responses and logs.
 
+In the test UI, **Scan back barcode** accepts a back photo by itself. It shows the
+number and decoded birth date when the barcode contains a supported plain NIC
+number. For mobile camera capture, serve this UI through HTTPS with access
+restricted to authorized users. The standalone scan route is available in
+local verifier mode. The BookingPartner API continues to return only statuses.
+Set `NIC_API_URL` when starting Next.js if the verifier uses a different port,
+for example `http://127.0.0.1:8001`.
+
 ### Measure OCR accuracy locally
 
 Keep a private JSON manifest outside source control. Each row has a front photo

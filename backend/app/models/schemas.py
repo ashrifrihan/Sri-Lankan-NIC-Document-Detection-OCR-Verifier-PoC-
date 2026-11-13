@@ -85,6 +85,11 @@ class BarcodeReview(BaseModel):
     nic_match: Literal["match", "mismatch", "unavailable"] = "unavailable"
 
 
+class BarcodeScan(BarcodeReview):
+    nic_number: Optional[str] = None
+    decoded_dob: Optional[str] = None
+
+
 class VerificationResponse(BaseModel):
     request_id: str
     can_train: bool = False

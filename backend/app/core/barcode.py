@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 from zxingcpp import BarcodeFormat, read_barcodes
 
-from ..models.schemas import BarcodeReview
+from ..models.schemas import BarcodeReview, BarcodeScan
 from ..utils.privacy import get_sanitized_logger
 from .nic_parser import are_nics_equivalent, parse_sri_lankan_nic
 
@@ -14,6 +14,14 @@ logger = get_sanitized_logger("barcode")
 
 
 def scan_back_barcode(image_bytes: bytes, front_nic: str | None) -> BarcodeReview:
+    return _scan_pdf417(image_bytes, front_nic)
+
+
+def scan_barcode_details(image_bytes: bytes) -> BarcodeScan:
+    return BarcodeScan.model_validate(_scan_pdf417(image_bytes, None, include_details=True).model_dump())
+
+
+def _scan_pdf417(image_bytes: bytes, front_nic: str | None, *, include_details=False) -> BarcodeReview:
     try:
         gray = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_GRAYSCALE)
         if gray is None:
@@ -45,8 +53,12 @@ def scan_back_barcode(image_bytes: bytes, front_nic: str | None) -> BarcodeRevie
     # issuer-defined parser. Never search arbitrary bytes for digit sequences.
     payload = next(iter(payloads)).strip()
     match = "unavailable"
-    if front_nic and re.fullmatch(rb"(?:[0-9]{12}|[0-9]{9}[VvXx])", payload):
+    parsed = None
+    if re.fullmatch(rb"(?:[0-9]{12}|[0-9]{9}[VvXx])", payload):
         candidate = payload.decode("ascii").upper()
-        if parse_sri_lankan_nic(candidate).is_valid and parse_sri_lankan_nic(front_nic).is_valid:
+        parsed = parse_sri_lankan_nic(candidate)
+        if parsed.is_valid and front_nic and parse_sri_lankan_nic(front_nic).is_valid:
             match = "match" if are_nics_equivalent(candidate, front_nic) else "mismatch"
+    if include_details and parsed and parsed.is_valid:
+        return BarcodeScan(status="decoded", format="PDF417", nic_number=parsed.nic_number, decoded_dob=parsed.decoded_dob)
     return BarcodeReview(status="decoded", format="PDF417", nic_match=match)
