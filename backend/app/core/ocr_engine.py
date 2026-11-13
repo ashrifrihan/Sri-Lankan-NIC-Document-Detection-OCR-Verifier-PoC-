@@ -1,11 +1,12 @@
-import os
 import re
 import sys
 import cv2
-import tempfile
-import subprocess
+from threading import Lock
+from statistics import mean
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
+from ..config import settings
+from .ocr_backends import OCRBackend, OCRLine, PaddleBackend, TesseractBackend, WindowsBackend
 from ..utils.privacy import get_sanitized_logger
 from .card_geometry import straighten_card
 from .nic_parser import parse_sri_lankan_nic
@@ -16,13 +17,49 @@ logger = get_sanitized_logger("ocr_engine")
 SINHALA_RANGE = re.compile(r"[\u0D80-\u0DFF]")
 TAMIL_RANGE = re.compile(r"[\u0B80-\u0BFF]")
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-WIN_OCR_PS1 = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", "run_win_ocr.ps1"))
-
 class OCREngine:
-    def __init__(self, lang: str = "en"):
-        self.lang = lang
-        self.is_win_ocr_available = sys.platform == "win32" and os.path.exists(WIN_OCR_PS1)
+    def __init__(self, backend=None, tessdata_dir=None):
+        self.selection = backend or settings.OCR_BACKEND
+        self.tessdata_dir = tessdata_dir
+        self._backends: dict[str, OCRBackend | None] = {}
+        self._lock = Lock()
+        self.active_engine: OCRBackend | None = None
+
+    def _load_backend(self, name: str) -> OCRBackend | None:
+        factories = {
+            "paddle": PaddleBackend,
+            "tesseract": lambda: TesseractBackend(self.tessdata_dir),
+            "windows": WindowsBackend,
+        }
+        if name not in self._backends:
+            try:
+                self._backends[name] = factories[name]()
+            except Exception as error:
+                self._backends[name] = None
+                logger.warning("OCR backend %s could not initialize (%s)", name, type(error).__name__)
+        return self._backends[name]
+
+    def _recognize(self, image):
+        selection = self.selection
+        if selection == "auto":
+            selection = "windows" if sys.platform == "win32" else "paddle"
+        order = ("paddle", "tesseract") if selection == "paddle" else (selection,)
+        with self._lock:
+            available = None
+            for name in order:
+                backend = self._load_backend(name)
+                if backend is None:
+                    continue
+                try:
+                    lines = backend.read(image)
+                except Exception as error:
+                    logger.warning("OCR backend %s failed (%s)", backend.name, type(error).__name__)
+                    continue
+                self.active_engine = backend
+                available = backend.name
+                if lines:
+                    return backend.name, lines
+            return available or "Unavailable", []
 
     def detect_scripts(self, text: str) -> Dict[str, bool]:
         """Detects presence of Latin, Sinhala, or Tamil characters in extracted text."""
@@ -31,27 +68,6 @@ class OCREngine:
             "has_tamil": bool(TAMIL_RANGE.search(text)),
             "has_latin": bool(re.search(r"[A-Za-z]", text))
         }
-
-    def _run_win_ocr_on_file(self, file_path: str) -> List[str]:
-        """Invokes built-in Windows Media OCR via PowerShell script."""
-        try:
-            cmd = [
-                "powershell",
-                "-NoProfile",
-                "-ExecutionPolicy", "Bypass",
-                "-File", WIN_OCR_PS1,
-                file_path
-            ]
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-            if proc.returncode == 0:
-                lines = [l.strip() for l in proc.stdout.splitlines() if l.strip()]
-                return lines
-            else:
-                logger.warning(f"Windows OCR returned error: {proc.stderr}")
-                return []
-        except Exception as e:
-            logger.error(f"Failed to execute Windows Native OCR: {str(e)}")
-            return []
 
     def run_ocr(self, image_bytes: bytes, *, compare_profiles=False, prefer_enhanced=False, prefer_enhanced_name=False) -> Tuple[List[str], float, Dict[str, Any]]:
         """Read the original image and retry with conservative enhancement if needed."""
@@ -65,7 +81,7 @@ class OCREngine:
         original_nic = self.extract_nic_candidate(original[0])
         if original_nic and not (compare_profiles or prefer_enhanced or prefer_enhanced_name) and self.extract_name_candidate(original[0]):
             return original
-        if not self.is_win_ocr_available:
+        if original[2]["engine"] == "Unavailable":
             return original
 
         # Work only on an OCR copy. Keep the original for quality assessment.
@@ -79,7 +95,7 @@ class OCREngine:
         enhanced = self._read_image(cv2.cvtColor(sharpened, cv2.COLOR_GRAY2BGR))
         enhanced_nic = self.extract_nic_candidate(enhanced[0])
         use_enhanced = (enhanced_nic and (prefer_enhanced or not original_nic)) or (not original[0] and enhanced[0])
-        lines, confidence, metadata = enhanced if use_enhanced else original
+        lines, _, metadata = enhanced if use_enhanced else original
         if compare_profiles:
             metadata["profile_candidates"] = (original_nic, enhanced_nic)
         original_name = self.extract_name_candidate(original[0])
@@ -93,22 +109,29 @@ class OCREngine:
             if straight is not img:
                 scale = min(3.0, max(1.0, 650 / min(straight.shape[:2])))
                 prepared = cv2.resize(straight, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-                straight_lines, _, _ = self._read_image(prepared)
+                straight_lines, _, straight_meta = self._read_image(prepared)
                 if not nic:
                     nic = self.extract_nic_candidate(straight_lines)
                     if nic:
                         lines = straight_lines
+                        metadata["engine"] = straight_meta["engine"]
+                        metadata["line_confidences"] = straight_meta["line_confidences"]
                 name = name or self.extract_name_candidate(straight_lines)
             if not nic and straight.shape[1] > straight.shape[0]:
                 h, w = straight.shape[:2]
                 number_region = straight[round(.15*h):round(.30*h), round(.36*w):round(.96*w)]
                 if number_region.size:
                     prepared = cv2.resize(number_region, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-                    number_lines, _, _ = self._read_image(prepared)
+                    number_lines, _, number_meta = self._read_image(prepared)
                     candidate = self.extract_nic_candidate(number_lines)
                     if candidate and candidate.isdigit() and parse_sri_lankan_nic(candidate).is_valid:
                         nic = candidate
                         lines = [*lines, candidate]
+                        score = next(
+                            (value for text, value in zip(number_lines, number_meta["line_confidences"])
+                             if candidate.casefold() in text.casefold()), None
+                        )
+                        metadata["line_confidences"] = [*metadata["line_confidences"], score]
             if nic and nic.isdigit() and not name:
                 name = self._read_modern_name_region(straight)
                 if name is None and straight is not img:
@@ -117,10 +140,16 @@ class OCREngine:
                 h, w = img.shape[:2]
                 old_number = img[round(.22*h):round(.40*h), round(.17*w):round(.86*w)]
                 if old_number.size:
-                    old_lines, _, _ = self._read_image(old_number)
+                    old_lines, _, number_meta = self._read_image(old_number)
+                    number_lines = old_lines
                     candidate = self.extract_nic_candidate(old_lines)
                     if candidate and candidate.endswith(("V", "X")) and parse_sri_lankan_nic(candidate).is_valid:
                         lines = [*lines, candidate]
+                        score = next(
+                            (value for text, value in zip(number_lines, number_meta["line_confidences"])
+                             if candidate.casefold() in text.casefold()), None
+                        )
+                        metadata["line_confidences"] = [*metadata["line_confidences"], score]
         metadata["recovered_name"] = name
         metadata["labeled_dob"] = self.extract_labeled_dob(lines) or self.extract_labeled_dob(
             original[0] if use_enhanced else enhanced[0]
@@ -136,7 +165,10 @@ class OCREngine:
         metadata["field_warnings"] = disagreements
         if "nic" in disagreements:
             metadata["alternate_nic_reads"] = [original_nic, enhanced_nic]
-        return lines, confidence, metadata
+        scores = [score for score in metadata["line_confidences"] if score is not None]
+        metadata["line_count"] = len(lines)
+        metadata["detected_scripts"] = self.detect_scripts(" ".join(lines))
+        return lines, mean(scores) if scores else 0.0, metadata
 
     def _read_modern_name_region(self, img: np.ndarray) -> Optional[str]:
         """Retry the English name area on a straightened landscape card image."""
@@ -157,88 +189,41 @@ class OCREngine:
         return self.extract_name_candidate(lines)
 
     def _read_image(self, img: np.ndarray) -> Tuple[List[str], float, Dict[str, Any]]:
-        """
-        Executes OCR on raw image bytes.
-        Supports multi-angle auto-rotation (0, 90, 270 degrees) to ensure rotated photos are correctly read.
-        """
-        lines: List[str] = []
-        confidences: List[float] = []
-        active_engine = "Fallback"
+        """Pick the strongest orientation and preserve confidence with its lines."""
+        height, width = img.shape[:2]
+        rotations = (None, cv2.ROTATE_180)
+        if height > width:
+            rotations = (cv2.ROTATE_90_COUNTERCLOCKWISE, cv2.ROTATE_90_CLOCKWISE, None, cv2.ROTATE_180)
 
-        h, w = img.shape[:2]
+        best: list[OCRLine] = []
+        best_score = -1
+        engine = "Unavailable"
+        for rotation in rotations:
+            candidate_engine, rows = self._recognize(img if rotation is None else cv2.rotate(img, rotation))
+            texts = [row.text for row in rows]
+            joined = " ".join(texts).upper()
+            has_nic = bool(self.extract_nic_candidate(texts))
+            score = min(len(texts), 9)
+            if "IDENTITY CARD" in joined or "NATIONAL IDENTITY" in joined:
+                score += 50
+            if "SRI LANKA" in joined:
+                score += 30
+            if has_nic:
+                score += 40
+            if score > best_score:
+                best, best_score, engine = rows, score, candidate_engine
+            if candidate_engine == "Unavailable" or score >= 80 or (rotation is None and has_nic):
+                break
 
-        if self.is_win_ocr_available:
-            # Check orientations to test:
-            # If portrait (height > width), standard ID cards are landscape, so rotate 90 and 270 degrees
-            orientations = [0, 180]
-            if h > w:
-                orientations = [270, 90, 0]  # Try 90 deg clockwise first
-
-            best_lines = []
-            best_score = -1
-
-            for rot_angle in orientations:
-                temp_img = img
-                if rot_angle == 90:
-                    temp_img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
-                elif rot_angle == 180:
-                    temp_img = cv2.rotate(img, cv2.ROTATE_180)
-                elif rot_angle == 270:
-                    temp_img = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
-
-                # Write to ephemeral temp file
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                    temp_path = tf.name
-
-                try:
-                    if not cv2.imwrite(temp_path, temp_img):
-                        continue
-                    candidate_lines = self._run_win_ocr_on_file(temp_path)
-                finally:
-                    if os.path.exists(temp_path):
-                        try:
-                            os.remove(temp_path)
-                        except Exception:
-                            pass
-
-                # Score this orientation based on recognized keywords & numbers
-                joined = " ".join(candidate_lines).upper()
-                score = 0
-                if "NATIONAL IDENTITY" in joined or "IDENTITY CARD" in joined:
-                    score += 50
-                if "SRI LANKA" in joined:
-                    score += 30
-                if self.extract_nic_candidate(candidate_lines):
-                    score += 40
-                score += min(len(candidate_lines), 9)
-
-                if score > best_score:
-                    best_score = score
-                    best_lines = candidate_lines
-
-                if score >= 80 or (rot_angle == 0 and self.extract_nic_candidate(candidate_lines)):
-                    break
-
-            if best_lines:
-                lines = best_lines
-                confidences = [0.95] * len(lines)
-                active_engine = "Windows-Native-OCR"
-
-        avg_conf = float(np.mean(confidences)) if confidences else 0.0
-        joined_text = " ".join(lines)
-        scripts = self.detect_scripts(joined_text)
-
-        metadata = {
-            "engine": active_engine,
-            "language": self.lang,
-            "detected_scripts": scripts,
+        lines = [row.text for row in best]
+        scores = [row.confidence for row in best]
+        measured = [score for score in scores if score is not None]
+        return lines, mean(measured) if measured else 0.0, {
+            "engine": engine,
+            "line_confidences": scores,
             "line_count": len(lines),
-            "script_support_notice": (
-                "OCR engine active. Latin alphanumeric & trilingual headings supported."
-            )
+            "detected_scripts": self.detect_scripts(" ".join(lines)),
         }
-
-        return lines, round(avg_conf, 2), metadata
 
     def extract_nic_candidate(self, lines: List[str]) -> Optional[str]:
         """
@@ -363,4 +348,4 @@ class OCREngine:
 
         return None
 
-ocr_service = OCREngine()
+ocr_service = OCREngine(tessdata_dir=settings.TESSDATA_PREFIX)

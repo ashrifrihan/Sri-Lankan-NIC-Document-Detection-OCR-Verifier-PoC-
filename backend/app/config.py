@@ -1,6 +1,6 @@
 from pydantic_settings import BaseSettings
 from pydantic import ConfigDict, SecretStr, field_validator
-from typing import List
+from typing import List, Literal
 
 class Settings(BaseSettings):
     model_config = ConfigDict(env_file=".env", extra="ignore")
@@ -47,7 +47,8 @@ class Settings(BaseSettings):
     ASPECT_RATIO_TOLERANCE: float = 0.35
 
     # OCR Settings
-    PADDLE_OCR_LANG: str = "en"
-    ENABLE_ANGLE_CLS: bool = True
+    OCR_BACKEND: Literal["auto", "paddle", "tesseract", "windows"] = "auto"
+    TESSDATA_PREFIX: str | None = None
+    OCR_REVIEW_CONFIDENCE: float = 0.65
 
 settings = Settings()

@@ -34,8 +34,9 @@
    - **Framing & Aspect Ratio**: Suspected cropping and ID-1 aspect ratio verification.
    - **User Guidance**: Actionable suggestions to retake photos under better lighting/focus.
 
-4. **Local Windows OCR**:
-   - Reads using the OCR languages installed on your Windows profile.
+4. **Local, cross-platform OCR**:
+   - PaddleOCR is the default on Linux, with in-process Tesseract fallback.
+   - Tesseract loads English, Sinhala, and Tamil. Windows can use its installed OCR profile languages.
    - Unicode block detection for Sinhala (`\u0D80-\u0DFF`) and Tamil (`\u0B80-\u0BFF`).
 
 5. **Field-by-Field Matching**:
@@ -44,9 +45,9 @@
    - Never guesses on ambiguous Sinhala/Tamil transliterations.
 
 6. **Privacy & Ephemeral Processing**:
-   - No database.
-   - Images processed purely in memory or cleaned-up temporary buffers.
-   - Sensitive PII (NIC, full names, dates of birth) masked in log outputs.
+   - Local training persists aggregate counts.
+   - OCR receives decoded pixels in memory.
+   - Application logs omit NIC numbers, names, and dates of birth.
    - Bound to localhost (`127.0.0.1`) with strict CORS restriction.
 
 ---
@@ -68,7 +69,7 @@ sri-lanka-nic-verifier/
 │   │   │   ├── nic_parser.py      # Sri Lankan NIC decoding algorithms
 │   │   │   ├── image_quality.py   # OpenCV blur, brightness, glare checks
 │   │   │   ├── classifier.py      # Heuristic document classifier
-│   │   │   ├── ocr_engine.py      # Windows OCR and photo preprocessing
+│   │   │   ├── ocr_engine.py      # OCR selection and photo preprocessing
 │   │   │   └── matcher.py         # Field-by-field normalization & comparison
 │   │   └── utils/
 │   │       ├── __init__.py
@@ -110,7 +111,7 @@ sri-lanka-nic-verifier/
 ## 🚀 Setup & Running Instructions (Windows)
 
 ### Prerequisites
-- **Python 3.10+** (Python 3.12 supported with opencv-python-headless & fallback/standard OCR)
+- **Python 3.11+** on Windows with PyWinRT
 - **Node.js v18+** and **npm**
 
 ---
@@ -167,15 +168,35 @@ select **Save training feedback**. The app learns which preprocessing option
 reads each field more accurately on photos with similar quality. The SQLite file at
 `%LOCALAPPDATA%\SriLankaNICVerifier\analysis.sqlite3` holds aggregate counts.
 Pending OCR number and name candidates stay in memory and are eligible for feedback for
-up to 15 minutes. Windows OCR runs locally and the learning model uses no service
-or pretrained model download.
+up to 15 minutes. All OCR inference runs locally.
+
+### Select an OCR backend
+
+Set `OCR_BACKEND` in the environment or backend `.env`.
+
+| Value | Behavior |
+| --- | --- |
+| `auto` | In-process Windows OCR on Windows, PaddleOCR with Tesseract fallback on Linux |
+| `paddle` | PaddleOCR PP-OCRv5 English on CPU. Falls back to Tesseract if initialization or inference fails, or if it returns no text. |
+| `tesseract` | Tesseract with `eng+sin+tam` |
+| `windows` | Windows only, using WinRT and the Windows profile's installed OCR languages |
+
+For Linux on Debian, install `libtesseract-dev`, `libleptonica-dev`,
+`tesseract-ocr-eng`, `tesseract-ocr-sin`, and `tesseract-ocr-tam`. Then run
+`python -m pip install -r requirements-ocr.txt` in the backend environment.
+Set `TESSDATA_PREFIX` to the directory containing the three `.traineddata`
+files if Tesseract cannot locate them. PaddleOCR prepares its weights on first
+initialization and may download them to its model cache. Warm it using a
+synthetic upload before serving traffic. Docker packaging comes in Phase 5.
+
+The OCR service loads each backend once per process. It reports per-line scores
+when the backend exposes them. Windows OCR reports unknown scores, and the app
+flags OCR with low or unknown confidence for manual review.
 
 ### BookingPartner integration on AWS
 
-1. Start with an EC2 Windows test instance. Run OCR on a synthetic NIC using
-   the Windows account that will run FastAPI. Check that Windows OCR returns
-   text before sending real documents. Availability depends on the Windows
-   image and the OCR languages installed for that account.
+1. Set up the Linux OCR dependencies above on your test instance. Run OCR on
+   a synthetic NIC with the same backend and runtime that will serve requests.
 2. Run FastAPI as a service without reload. Keep port 8000 private and put it
    behind an HTTPS endpoint reachable by BookingPartner's backend. If both run
    in the same VPC, use an internal HTTPS endpoint and restrict ingress to
@@ -323,6 +344,7 @@ Set `printed_dob` only when the birth date is visible on the front photo.
 
 ## 🔒 Privacy & Security Design
 - **Localhost Bound**: API listens on `127.0.0.1` and CORS only permits `localhost:3000`.
-- **Log Masking**: NICs are logged as `85*****34V`, names as `K*** P***`.
-- **Ephemeral Processing**: No document images are retained on disk after analysis.
+- **Application Logs**: Request IDs are logged without NIC numbers or names.
+- **In-memory Images**: Multipart uploads and decoded OCR pixels stay in memory.
+  Keep the API private behind a gateway with a request-body limit.
 - **Human Authority**: All automated scores are explicitly marked as provisional and require human verification.

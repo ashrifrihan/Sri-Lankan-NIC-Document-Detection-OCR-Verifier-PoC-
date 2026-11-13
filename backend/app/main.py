@@ -9,6 +9,7 @@ from fastapi import Depends, FastAPI, Header, UploadFile, File, Form, HTTPExcept
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.requests import Request
+from starlette.formparsers import MultiPartParser
 
 from .config import settings
 from .utils.privacy import get_sanitized_logger
@@ -30,6 +31,9 @@ from .core.matcher import compare_nic, compare_dob, compare_names
 from .core.local_model import local_model
 
 logger = get_sanitized_logger("main")
+# SpooledTemporaryFile treats zero as disabling automatic disk rollover.
+MultiPartParser.spool_max_size = 0
+MultiPartParser.max_file_size = 0  # Starlette versions before the attribute rename.
 booking_requests = deque()
 booking_lock = Lock()
 booking_in_flight: set[str] = set()
@@ -52,15 +56,14 @@ app.add_middleware(
 @app.get("/api/health")
 def health_check():
     """System health check and OCR engine status."""
-    engine = "Unavailable"
-    if ocr_service.is_win_ocr_available:
-        engine = "Windows OCR"
+    engine = ocr_service.active_engine
     return {
         "status": "healthy",
         "app_name": settings.APP_NAME,
         "version": settings.APP_VERSION,
-        "ocr_engine": engine,
-        "ocr_language": settings.PADDLE_OCR_LANG,
+        "ocr_engine": engine.name if engine else "Not initialized",
+        "ocr_language": engine.languages if engine else None,
+        "ocr_backend_config": settings.OCR_BACKEND,
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
@@ -233,6 +236,13 @@ def verify_nic(
     # 7. Field-by-Field Matching
     encoded_dob = nic_validation.decoded_dob if (nic_validation and nic_validation.is_valid) else None
     field_warnings = ocr_meta.get("field_warnings", {})
+    scores = ocr_meta.get("line_confidences", [])
+    if extracted_nic and scores and (
+        any(score is None for score in scores) or ocr_conf < settings.OCR_REVIEW_CONFIDENCE
+        or any(extracted_nic in "".join(line.upper().split()) and score < settings.OCR_REVIEW_CONFIDENCE
+               for line, score in zip(ocr_lines, scores) if score is not None)
+    ):
+        field_warnings.setdefault("nic", "OCR confidence is low or unavailable. Check the number against the card.")
     if extracted_dob and extracted_nic and encoded_dob and extracted_dob != encoded_dob:
         field_warnings["dob"] = "The date read from the card differs from the date encoded in the NIC. Check both fields."
 
