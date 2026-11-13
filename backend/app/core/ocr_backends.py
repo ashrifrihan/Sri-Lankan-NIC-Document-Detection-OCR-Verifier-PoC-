@@ -7,6 +7,7 @@ from typing import Protocol
 import cv2
 import numpy as np
 from PIL import Image
+from .nic_field import NIC_ALPHABET
 
 
 @dataclass(frozen=True)
@@ -55,12 +56,24 @@ class TesseractBackend:
         from tesserocr import PSM, RIL, PyTessBaseAPI, get_languages, iterate_level
 
         self.level = RIL.TEXTLINE
+        self.field_psm = PSM.SINGLE_BLOCK
+        self.page_psm = PSM.AUTO
         self.iterate_level = iterate_level
         options = {"path": data_dir} if data_dir else {}
         path, languages = get_languages(**options)
         if not set(self.languages.split("+")).issubset(languages):
             raise RuntimeError("Tesseract requires English, Sinhala and Tamil language data.")
         self.api = PyTessBaseAPI(path=path, lang=self.languages, psm=PSM.AUTO)
+
+    def read_nic(self, image):
+        self.api.SetPageSegMode(self.field_psm)
+        try:
+            if not self.api.SetVariable("tessedit_char_whitelist", NIC_ALPHABET):
+                raise RuntimeError("Could not set the Tesseract NIC whitelist.")
+            return self.read(image)
+        finally:
+            self.api.SetVariable("tessedit_char_whitelist", "")
+            self.api.SetPageSegMode(self.page_psm)
 
     def read(self, image):
         pixels = cv2.cvtColor(image, cv2.COLOR_BGR2RGB) if image.ndim == 3 else image

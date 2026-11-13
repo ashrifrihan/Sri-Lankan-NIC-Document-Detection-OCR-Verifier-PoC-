@@ -193,6 +193,16 @@ The OCR service loads each backend once per process. It reports per-line scores
 when the backend exposes them. Windows OCR reports unknown scores, and the app
 flags OCR with low or unknown confidence for manual review.
 
+### NIC number field OCR
+
+The verifier reads the expected number region on the selected card orientation
+using the original and enhanced crop. Tesseract applies a digits and V/X
+whitelist first. PaddleOCR and Windows OCR constrain the result after decoding.
+A crop read can correct common look-alike letters in digit positions, and each
+candidate must pass the NIC parser. A valid full-card read takes precedence
+when the crop disagrees. The local review UI displays alternate reads, and
+BookingPartner receives a manual-review warning without the raw numbers.
+
 ### BookingPartner integration on AWS
 
 1. Set up the Linux OCR dependencies above on your test instance. Run OCR on

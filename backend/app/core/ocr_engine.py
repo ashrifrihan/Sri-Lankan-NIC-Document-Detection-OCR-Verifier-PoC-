@@ -9,6 +9,7 @@ from ..config import settings
 from .ocr_backends import OCRBackend, OCRLine, PaddleBackend, TesseractBackend, WindowsBackend
 from ..utils.privacy import get_sanitized_logger
 from .card_geometry import straighten_card
+from .nic_field import normalize_nic_field
 from .nic_parser import parse_sri_lankan_nic
 
 logger = get_sanitized_logger("ocr_engine")
@@ -39,7 +40,7 @@ class OCREngine:
                 logger.warning("OCR backend %s could not initialize (%s)", name, type(error).__name__)
         return self._backends[name]
 
-    def _recognize(self, image):
+    def _recognize(self, image, *, nic_field=False):
         selection = self.selection
         if selection == "auto":
             selection = "windows" if sys.platform == "win32" else "paddle"
@@ -51,12 +52,23 @@ class OCREngine:
                 if backend is None:
                     continue
                 try:
-                    lines = backend.read(image)
+                    if nic_field and isinstance(backend, TesseractBackend):
+                        lines = backend.read_nic(image)
+                        if not any(normalize_nic_field(row.text) for row in lines):
+                            lines = backend.read(image)
+                    else:
+                        lines = backend.read(image)
                 except Exception as error:
                     logger.warning("OCR backend %s failed (%s)", backend.name, type(error).__name__)
                     continue
                 self.active_engine = backend
                 available = backend.name
+                if nic_field:
+                    lines = [
+                        OCRLine(candidate, row.confidence)
+                        for row in lines
+                        if (candidate := normalize_nic_field(row.text))
+                    ]
                 if lines:
                     return backend.name, lines
             return available or "Unavailable", []
@@ -79,20 +91,13 @@ class OCREngine:
 
         original = self._read_image(img)
         original_nic = self.extract_nic_candidate(original[0])
-        if original_nic and not (compare_profiles or prefer_enhanced or prefer_enhanced_name) and self.extract_name_candidate(original[0]):
-            return original
         if original[2]["engine"] == "Unavailable":
             return original
 
         # Work only on an OCR copy. Keep the original for quality assessment.
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        if 0 < min(gray.shape) < 500:
-            scale = min(2.0, 500 / min(gray.shape))
-            gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-        contrast = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
-        softened = cv2.GaussianBlur(contrast, (0, 0), 0.8)
-        sharpened = cv2.addWeighted(contrast, 1.35, softened, -0.35, 0)
-        enhanced = self._read_image(cv2.cvtColor(sharpened, cv2.COLOR_GRAY2BGR))
+        fast_pass = original_nic and not (compare_profiles or prefer_enhanced or prefer_enhanced_name)
+        fast_pass = fast_pass and self.extract_name_candidate(original[0])
+        enhanced = original if fast_pass else self._read_image(self._enhance(img))
         enhanced_nic = self.extract_nic_candidate(enhanced[0])
         use_enhanced = (enhanced_nic and (prefer_enhanced or not original_nic)) or (not original[0] and enhanced[0])
         lines, _, metadata = enhanced if use_enhanced else original
@@ -104,6 +109,7 @@ class OCREngine:
             metadata["name_candidates"] = (original_name, enhanced_name)
         name = (enhanced_name or original_name) if prefer_enhanced_name else (original_name or enhanced_name)
         nic = self.extract_nic_candidate(lines)
+        field_image = img
         if not nic or (nic.isdigit() and not name):
             straight = straighten_card(img)
             if straight is not img:
@@ -114,42 +120,23 @@ class OCREngine:
                     nic = self.extract_nic_candidate(straight_lines)
                     if nic:
                         lines = straight_lines
-                        metadata["engine"] = straight_meta["engine"]
-                        metadata["line_confidences"] = straight_meta["line_confidences"]
+                        metadata.update(straight_meta)
+                        field_image = straight
                 name = name or self.extract_name_candidate(straight_lines)
-            if not nic and straight.shape[1] > straight.shape[0]:
-                h, w = straight.shape[:2]
-                number_region = straight[round(.15*h):round(.30*h), round(.36*w):round(.96*w)]
-                if number_region.size:
-                    prepared = cv2.resize(number_region, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-                    number_lines, _, number_meta = self._read_image(prepared)
-                    candidate = self.extract_nic_candidate(number_lines)
-                    if candidate and candidate.isdigit() and parse_sri_lankan_nic(candidate).is_valid:
-                        nic = candidate
-                        lines = [*lines, candidate]
-                        score = next(
-                            (value for text, value in zip(number_lines, number_meta["line_confidences"])
-                             if candidate.casefold() in text.casefold()), None
-                        )
-                        metadata["line_confidences"] = [*metadata["line_confidences"], score]
             if nic and nic.isdigit() and not name:
                 name = self._read_modern_name_region(straight)
                 if name is None and straight is not img:
                     name = self._read_modern_name_region(img)
-            if not nic and img.shape[0] > img.shape[1]:
-                h, w = img.shape[:2]
-                old_number = img[round(.22*h):round(.40*h), round(.17*w):round(.86*w)]
-                if old_number.size:
-                    old_lines, _, number_meta = self._read_image(old_number)
-                    number_lines = old_lines
-                    candidate = self.extract_nic_candidate(old_lines)
-                    if candidate and candidate.endswith(("V", "X")) and parse_sri_lankan_nic(candidate).is_valid:
-                        lines = [*lines, candidate]
-                        score = next(
-                            (value for text, value in zip(number_lines, number_meta["line_confidences"])
-                             if candidate.casefold() in text.casefold()), None
-                        )
-                        metadata["line_confidences"] = [*metadata["line_confidences"], score]
+
+        # Crop from the chosen orientation so a sideways phone photo uses
+        # the same field coordinates as an upright card.
+        oriented = field_image if metadata["rotation"] is None else cv2.rotate(field_image, metadata["rotation"])
+        crop_reads = self._read_nic_region(oriented)
+        if not nic and crop_reads:
+            best = next(iter(crop_reads.values()))
+            nic = best.text
+            lines = [*lines, nic]
+            metadata["line_confidences"] = [*metadata["line_confidences"], best.confidence]
         metadata["recovered_name"] = name
         metadata["labeled_dob"] = self.extract_labeled_dob(lines) or self.extract_labeled_dob(
             original[0] if use_enhanced else enhanced[0]
@@ -163,12 +150,40 @@ class OCREngine:
             if all(pair) and pair[0].casefold() != pair[1].casefold():
                 disagreements[field] = "OCR passes returned different values. Check this field against the card."
         metadata["field_warnings"] = disagreements
-        if "nic" in disagreements:
-            metadata["alternate_nic_reads"] = [original_nic, enhanced_nic]
+        candidates = list(dict.fromkeys(value for value in (nic, original_nic, enhanced_nic, *crop_reads) if value))
+        if len(candidates) > 1:
+            disagreements["nic"] = "OCR passes returned different values. Check this field against the card."
+            metadata["alternate_nic_reads"] = candidates
         scores = [score for score in metadata["line_confidences"] if score is not None]
         metadata["line_count"] = len(lines)
         metadata["detected_scripts"] = self.detect_scripts(" ".join(lines))
         return lines, mean(scores) if scores else 0.0, metadata
+
+    @staticmethod
+    def _enhance(image: np.ndarray) -> np.ndarray:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+        if min(gray.shape) < 500:
+            scale = min(2.0, 500 / min(gray.shape))
+            gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        contrast = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
+        softened = cv2.GaussianBlur(contrast, (0, 0), 0.8)
+        return cv2.addWeighted(contrast, 1.35, softened, -0.35, 0)
+
+    def _read_nic_region(self, image: np.ndarray) -> dict[str, OCRLine]:
+        height, width = image.shape[:2]
+        if width >= height:
+            crop = image[round(.15 * height):round(.34 * height), round(.27 * width):round(.97 * width)]
+        else:
+            crop = image[round(.22 * height):round(.40 * height), round(.17 * width):round(.86 * width)]
+        if not crop.size:
+            return {}
+
+        reads = {}
+        for prepared in (crop, self._enhance(crop)):
+            _, rows = self._recognize(prepared, nic_field=True)
+            for row in rows:
+                reads.setdefault(row.text, row)
+        return reads
 
     def _read_modern_name_region(self, img: np.ndarray) -> Optional[str]:
         """Retry the English name area on a straightened landscape card image."""
@@ -198,6 +213,7 @@ class OCREngine:
         best: list[OCRLine] = []
         best_score = -1
         engine = "Unavailable"
+        selected_rotation = None
         for rotation in rotations:
             candidate_engine, rows = self._recognize(img if rotation is None else cv2.rotate(img, rotation))
             texts = [row.text for row in rows]
@@ -212,6 +228,7 @@ class OCREngine:
                 score += 40
             if score > best_score:
                 best, best_score, engine = rows, score, candidate_engine
+                selected_rotation = rotation
             if candidate_engine == "Unavailable" or score >= 80 or (rotation is None and has_nic):
                 break
 
@@ -220,6 +237,7 @@ class OCREngine:
         measured = [score for score in scores if score is not None]
         return lines, mean(measured) if measured else 0.0, {
             "engine": engine,
+            "rotation": selected_rotation,
             "line_confidences": scores,
             "line_count": len(lines),
             "detected_scripts": self.detect_scripts(" ".join(lines)),
@@ -233,33 +251,11 @@ class OCREngine:
         2. 9 digits followed by V or X (pre-2016 format, e.g. 853451234V)
         """
         joined = "\n".join(lines)
-
-        # 12-digit format pattern
-        new_pattern = re.compile(r"\b([12]\d{3}[0-8]\d{2}\d{5})\b|\b([0-9]{12})\b")
-        m_new = new_pattern.search(joined)
-        if m_new:
-            val = m_new.group(1) or m_new.group(2)
-            clean = re.sub(r"\s+", "", val)
-            return clean
-
-        # Also search line by line if label precedes number (e.g. 'No.: 200285701548' or 'අංකය: 200285701548')
-        for line in lines:
-            m = re.search(r"(\b[12]\d{11}\b)", line)
-            if m:
-                return m.group(1)
-
-        # 9-digit format pattern
-        old_pattern = re.compile(r"\b([0-9]{9}\s?[vVxX])\b")
-        m_old = old_pattern.search(joined)
-        if m_old:
-            clean = re.sub(r"\s+", "", m_old.group(1)).upper()
-            return clean
-
-        loose_pattern = re.compile(r"\b([0-9]{9})\s*([VvXx])\b")
-        m_loose = loose_pattern.search(joined)
-        if m_loose:
-            return f"{m_loose.group(1)}{m_loose.group(2).upper()}"
-
+        for pattern in (r"\b[0-9]{12}\b", r"\b[0-9]{9}[ \t]*[VvXx]\b"):
+            for match in re.finditer(pattern, joined):
+                candidate = normalize_nic_field(match.group())
+                if candidate:
+                    return candidate
         return None
 
     def extract_labeled_dob(self, lines: List[str]) -> Optional[str]:
