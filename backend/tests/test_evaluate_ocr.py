@@ -11,7 +11,7 @@ def test_metrics_include_unread_in_denominator_and_group_by_type_and_quality(mon
     create_synthetic_samples(tmp_path, quiet=True)
     responses = iter([
         (["853451234V", "Name: SAMPLE PERSON", "DOB: 1985/12/10"], .9, {}),
-        ([], 0, {"detected_nic": "853451235V"}),
+        (["853451235V"], .9, {}),
         ([], 0, {}),
     ])
     monkeypatch.setattr(evaluate_ocr.ocr_service, "run_ocr", lambda *args, **kwargs: next(responses))

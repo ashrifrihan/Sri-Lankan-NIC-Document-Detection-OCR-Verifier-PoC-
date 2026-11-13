@@ -316,6 +316,16 @@ From the backend directory, run
 in the environment. The command uploads only the bundled synthetic card and
 checks authorization, OCR usability, and response privacy.
 
+### Scan the NIC back barcode
+
+When an upload includes `back_image`, the verifier also scans for a PDF417
+barcode in memory and continues reading printed text with OCR. Both verify
+endpoints return `back_barcode` with `status`, `format`, and `nic_match`.
+The comparison supports a payload containing a plain, valid NIC number.
+Structured and opaque payloads are reported as decoded with comparison
+unavailable. A mismatch or multiple distinct values triggers a review warning.
+The barcode payload is excluded from responses and logs.
+
 ### Measure OCR accuracy locally
 
 Keep a private JSON manifest outside source control. Each row has a front photo

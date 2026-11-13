@@ -42,7 +42,8 @@ def test_verify_endpoint_unsupported_file():
     assert exc_info.value.status_code == 400
     assert "Unsupported file format" in exc_info.value.detail
 
-def test_verify_endpoint_full_flow():
+def test_verify_endpoint_full_flow(monkeypatch):
+    monkeypatch.setattr(ocr_service, "run_ocr", lambda _, **kwargs: ([], 0.0, {"engine": "Fake"}))
     png_bytes = create_dummy_png()
     img_file = UploadFile(filename="front.png", file=io.BytesIO(png_bytes), headers={"content-type": "image/png"})
     

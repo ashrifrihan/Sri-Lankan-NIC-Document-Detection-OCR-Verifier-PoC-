@@ -45,6 +45,18 @@ export const ResultsView: React.FC<ResultsViewProps> = ({
   const [focus, setFocus] = useState<{ x: number; y: number } | null>(null);
   const review = useRef<HTMLDetailsElement>(null);
   const reviewPhoto = reviewSide === 'front' ? frontPreview : backPreview;
+  const barcode = result.back_barcode;
+  const barcodeNeedsReview = barcode?.status === 'ambiguous' || barcode?.nic_match === 'mismatch';
+
+  function inspectBackPhoto() {
+    setReviewSide('back');
+    setFocus(null);
+    setZoom(100);
+    if (review.current) {
+      review.current.open = true;
+      review.current.scrollIntoView({ block: 'nearest' });
+    }
+  }
 
   function inspectField(field: 'nic' | 'name' | 'dob') {
     const oldCard = /[VX]$/i.test(result.extracted_nic ?? '');
@@ -136,6 +148,30 @@ export const ResultsView: React.FC<ResultsViewProps> = ({
       {result.review_status && <p className="text-sm font-semibold text-slate-700">
         {{ readable: 'Readable', retake_needed: 'Retake needed', manual_review: 'Manual review' }[result.review_status]}
       </p>}
+      {barcode && (
+        <section className={`rounded-2xl border p-5 text-sm ${barcodeNeedsReview ? 'border-amber-300 bg-amber-50' : 'border-slate-200 bg-white'}`}>
+          <h2 className="font-semibold">Back barcode</h2>
+          <p className="mt-1 font-medium">{{
+            unread: 'Could not read a barcode',
+            decoded: 'PDF417 barcode read',
+            ambiguous: 'Multiple barcode values found',
+            unavailable: 'Barcode scanner unavailable',
+          }[barcode.status]}</p>
+          {barcode.status === 'decoded' && <p className="mt-1 text-slate-600">{{
+            match: 'The barcode number matches the front OCR read.',
+            mismatch: 'The barcode number differs from the front OCR read. Check both sides.',
+            unavailable: 'The barcode did not yield a supported NIC number for comparison, or the front number could not be read.',
+          }[barcode.nic_match]}</p>}
+          {barcode.status === 'unread' && <p className="mt-1 text-slate-600">
+            Printed text was checked with OCR. If a barcode is present, try a sharper back photo with the full code visible.
+          </p>}
+          {barcode.status === 'ambiguous' && <p className="mt-1 text-slate-600">Check that the photo shows just one card.</p>}
+          {backPreview && <button type="button" onClick={inspectBackPhoto}
+            className="mt-3 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium">
+            Inspect back photo
+          </button>}
+        </section>
+      )}
 
       {reviewPhoto && (
         <details ref={review} className="rounded-2xl border border-slate-200 bg-white p-5">

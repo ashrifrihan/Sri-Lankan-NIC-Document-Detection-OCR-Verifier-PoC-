@@ -30,6 +30,7 @@ from .models.schemas import (
     MatchStatus
 )
 from .core.image_quality import assess_image_quality
+from .core.barcode import scan_back_barcode
 from .core.ocr_engine import ocr_service
 from .core.classifier import classify_sri_lankan_nic
 from .core.nic_parser import parse_sri_lankan_nic
@@ -244,18 +245,25 @@ def verify_nic(
         prefer_enhanced=local_model.prefers_enhanced(profile),
         **({"prefer_enhanced_name": True} if local_model.prefers_enhanced(f"name:{profile}") else {}),
     )
+    if ocr_meta.get("engine") == "Unavailable":
+        logger.error("No OCR backend is available for request %s", request_id)
+        raise HTTPException(503, "Text recognition is temporarily unavailable. Try again shortly.")
     candidates = ocr_meta.get("profile_candidates")
     can_train = candidates is not None and settings.BOOKINGPARTNER_API_KEY is None
     if can_train:
         local_model.remember(request_id, profile, *candidates, ocr_meta.get("name_candidates", (None, None)))
     extracted_name = ocr_meta.get("recovered_name") or ocr_service.extract_name_candidate(ocr_lines)
-    extracted_nic = ocr_meta.get("detected_nic") or ocr_service.extract_nic_candidate(ocr_lines)
+    extracted_nic = ocr_service.extract_nic_candidate(ocr_lines)
     extracted_dob = ocr_meta.get("labeled_dob") or ocr_service.extract_labeled_dob(ocr_lines)
     front_text = " ".join(ocr_lines).casefold()
     front_looks_like_back = "address" in front_text and ("date of issue" in front_text or "commissioner general" in front_text)
     back_looks_like_front = False
+    back_barcode = None
     if back_bytes:
-        back_lines, _, _ = ocr_service.run_ocr(back_bytes)
+        back_barcode = scan_back_barcode(back_bytes, extracted_nic)
+        back_lines, _, back_meta = ocr_service.run_ocr(back_bytes)
+        if back_meta.get("engine") == "Unavailable":
+            raise HTTPException(503, "Text recognition is temporarily unavailable. Try again shortly.")
         back_text = " ".join(back_lines).casefold()
         back_looks_like_front = "identity card" in back_text and ("holder" in back_text or "date of birth" in back_text)
         # A back-side issue date can look like a birth date. Require an explicit label.
@@ -280,12 +288,12 @@ def verify_nic(
 
     # 7. Field-by-Field Matching
     encoded_dob = nic_validation.decoded_dob if (nic_validation and nic_validation.is_valid) else None
-    field_warnings = ocr_meta.get("field_warnings", {})
+    field_warnings = dict(ocr_meta.get("field_warnings", {}))
+    if back_barcode and back_barcode.nic_match == "mismatch":
+        field_warnings["back_barcode"] = "The back barcode number differs from the front OCR read. Check both sides."
+    elif back_barcode and back_barcode.status == "ambiguous":
+        field_warnings["back_barcode"] = "Multiple barcode values were detected. Check the back photo."
     scores = ocr_meta.get("line_confidences", [])
-    if "detected_nic_confidence" in ocr_meta:
-        score = ocr_meta["detected_nic_confidence"]
-        if score is None or score < settings.OCR_REVIEW_CONFIDENCE:
-            field_warnings.setdefault("nic", "OCR confidence is low or unavailable. Check the number against the card.")
     if extracted_nic and scores and (
         any(score is None for score in scores) or ocr_conf < settings.OCR_REVIEW_CONFIDENCE
         or any(extracted_nic in "".join(line.upper().split()) and score < settings.OCR_REVIEW_CONFIDENCE
@@ -368,6 +376,7 @@ def verify_nic(
         can_train=can_train,
         front_quality=front_quality,
         back_quality=back_quality,
+        back_barcode=back_barcode,
         front_classification=classification,
         extracted_nic=extracted_nic,
         nic_validation=nic_validation,
@@ -404,4 +413,5 @@ def verify_bookingpartner(
         dob_source=result.dob_source,
         field_warnings=result.field_warnings,
         match_statuses={field: match.status for field, match in result.matches.items()},
+        back_barcode=result.back_barcode,
     )

@@ -46,7 +46,8 @@ def test_ocr_prefers_detected_fields_and_surfaces_conflict(monkeypatch):
     monkeypatch.setattr(engine, "_recognize", recognize)
     _, encoded = cv2.imencode(".png", image)
     lines, _, metadata = engine.run_ocr(encoded.tobytes())
-    assert metadata["detected_nic"] == "853451235V"
+    assert engine.extract_nic_candidate(lines) == "853451234V"
+    assert "detected_nic" not in metadata
     assert set(metadata["alternate_nic_reads"]) == {"853451234V", "853451235V"}
     assert metadata["recovered_name"] == "SAMPLE PERSON"
     assert metadata["labeled_dob"] == "1985-12-10"

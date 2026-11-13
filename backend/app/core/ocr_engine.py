@@ -72,6 +72,8 @@ class OCREngine:
                     ]
                 if lines:
                     return backend.name, lines
+            if available is None and not nic_field:
+                self.active_engine = None
             return available or "Unavailable", []
 
     def warmup(self):
@@ -149,11 +151,6 @@ class OCREngine:
         else:
             crop_reads = {} if detected else self._read_nic_region(oriented)
         full_card_nic = nic
-        if detected and crop_reads:
-            best = next(iter(crop_reads.values()))
-            metadata["detected_nic_confidence"] = best.confidence
-            if best.text != nic:
-                metadata["detected_nic"] = best.text
         if not nic and crop_reads:
             best = next(iter(crop_reads.values()))
             nic = best.text

@@ -68,6 +68,11 @@ export interface VerificationResponse {
   field_warnings?: Record<string, string>;
   alternate_nic_reads?: string[];
   review_status?: 'readable' | 'retake_needed' | 'manual_review';
+  back_barcode?: {
+    status: 'unread' | 'decoded' | 'ambiguous' | 'unavailable';
+    format: 'PDF417' | null;
+    nic_match: 'match' | 'mismatch' | 'unavailable';
+  } | null;
   matches: {
     nic: FieldMatchResult;
     name: FieldMatchResult;

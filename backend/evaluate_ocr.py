@@ -54,7 +54,7 @@ def evaluate_cases(cases, root, split, *, use_local_model):
             prefer_enhanced_name=use_local_model and local_model.prefers_enhanced(f"name:{profile}"),
         )
         fields = {
-            "nic": metadata.get("detected_nic") or ocr_service.extract_nic_candidate(lines),
+            "nic": ocr_service.extract_nic_candidate(lines),
             "name": metadata.get("recovered_name") or ocr_service.extract_name_candidate(lines),
             "printed_dob": metadata.get("labeled_dob") or ocr_service.extract_labeled_dob(lines),
         }

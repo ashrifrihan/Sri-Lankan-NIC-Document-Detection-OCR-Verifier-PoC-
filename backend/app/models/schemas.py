@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from enum import Enum
 
 class NICFormat(str, Enum):
@@ -79,6 +79,12 @@ class FieldMatchResult(BaseModel):
     confidence: float = 0.0
     reason: str
 
+class BarcodeReview(BaseModel):
+    status: Literal["unread", "decoded", "ambiguous", "unavailable"]
+    format: Optional[Literal["PDF417"]] = None
+    nic_match: Literal["match", "mismatch", "unavailable"] = "unavailable"
+
+
 class VerificationResponse(BaseModel):
     request_id: str
     can_train: bool = False
@@ -86,6 +92,7 @@ class VerificationResponse(BaseModel):
     field_warnings: Dict[str, str] = {}
     alternate_nic_reads: List[str] = []
     review_status: Optional[str] = None
+    back_barcode: Optional[BarcodeReview] = None
     processed_at: str
     front_quality: ImageQualityAssessment
     back_quality: Optional[ImageQualityAssessment] = None
@@ -105,6 +112,7 @@ class ValidateNICRequest(BaseModel):
 
 
 class BookingPartnerReview(BaseModel):
+    back_barcode: Optional[BarcodeReview] = None
     request_id: str
     review_status: str
     requires_manual_review: bool

@@ -252,12 +252,17 @@ export default function Home() {
                 />
                 <ImageUploader
                   label="NIC Back Image (Optional)"
-                  description="Back side with address & date stamp"
+                  description="Show the entire back, including the barcode if present"
                   file={backFile}
                   previewUrl={backPreview}
                   onFileSelect={handleBackSelect}
                 />
               </div>
+
+              <p className="text-xs text-slate-600">
+                For a modern NIC, keep the full barcode in focus and free of glare.
+                The verifier scans it automatically when you include the back photo.
+              </p>
 
               <div className="p-3 bg-slate-50 rounded-xl text-[11px] text-slate-500 space-y-1">
                 <p className="font-semibold text-slate-700">Photo Capture Advice:</p>
@@ -313,12 +318,12 @@ export default function Home() {
                 {isLoading ? (
                   <>
                     <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                    <span>Analyzing Document...</span>
+                    <span>{backFile ? 'Reading card and scanning barcode…' : 'Reading front photo…'}</span>
                   </>
                 ) : (
                   <>
                     <FileCheck className="w-4 h-4" />
-                    <span>Run Verification & OCR Test</span>
+                    <span>{backFile ? 'Read NIC and scan barcode' : 'Read NIC'}</span>
                   </>
                 )}
               </button>
