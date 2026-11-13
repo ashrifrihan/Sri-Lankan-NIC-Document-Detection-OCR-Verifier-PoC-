@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+node_modules/
+.next/
+*.tsbuildinfo
+*.log
+*.sqlite*
+*.db
+samples/
+*.pem
+*.key
