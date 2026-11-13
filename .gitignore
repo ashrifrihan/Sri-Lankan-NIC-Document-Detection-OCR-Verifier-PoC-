@@ -15,3 +15,6 @@ node_modules/
 samples/
 *.pem
 *.key
+*.pt
+*.pth
+runs/

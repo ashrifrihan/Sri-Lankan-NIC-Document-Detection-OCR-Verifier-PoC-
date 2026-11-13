@@ -33,9 +33,9 @@ def evaluate(manifest, split):
             prefer_enhanced_name=local_model.prefers_enhanced(f"name:{profile}"),
         )
         fields = {
-            "nic": ocr_service.extract_nic_candidate(lines),
+            "nic": metadata.get("detected_nic") or ocr_service.extract_nic_candidate(lines),
             "name": metadata.get("recovered_name") or ocr_service.extract_name_candidate(lines),
-            "printed_dob": ocr_service.extract_labeled_dob(lines) or metadata.get("labeled_dob"),
+            "printed_dob": metadata.get("labeled_dob") or ocr_service.extract_labeled_dob(lines),
         }
         for field, observed in fields.items():
             expected = case.get(field)

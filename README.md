@@ -203,6 +203,14 @@ candidate must pass the NIC parser. A valid full-card read takes precedence
 when the crop disagrees. The local review UI displays alternate reads, and
 BookingPartner receives a manual-review warning without the raw numbers.
 
+### Optional trained vision models
+
+The verifier can use YOLO for card and field crops and MobileNetV3-Small for
+card type. Install `backend/requirements-vision.txt` and follow the
+[private dataset and training guide](backend/dataset/README.md).
+Set `NIC_DETECTOR_WEIGHTS` and `NIC_CLASSIFIER_WEIGHTS` to trusted local
+checkpoints. The heuristic pipeline remains available without usable weights.
+
 ### BookingPartner integration on AWS
 
 1. Set up the Linux OCR dependencies above on your test instance. Run OCR on

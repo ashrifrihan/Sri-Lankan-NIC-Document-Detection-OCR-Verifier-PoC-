@@ -11,6 +11,7 @@ from ..utils.privacy import get_sanitized_logger
 from .card_geometry import straighten_card
 from .nic_field import normalize_nic_field
 from .nic_parser import parse_sri_lankan_nic
+from .vision_models import vision_models
 
 logger = get_sanitized_logger("ocr_engine")
 
@@ -89,7 +90,9 @@ class OCREngine:
         if img is None:
             return [], 0.0, {"engine": "none", "error": "Decode failed"}
 
-        original = self._read_image(img)
+        detected = vision_models.detect(img)
+        document = detected.get("card", img)
+        original = self._read_image(document)
         original_nic = self.extract_nic_candidate(original[0])
         if original[2]["engine"] == "Unavailable":
             return original
@@ -97,7 +100,7 @@ class OCREngine:
         # Work only on an OCR copy. Keep the original for quality assessment.
         fast_pass = original_nic and not (compare_profiles or prefer_enhanced or prefer_enhanced_name)
         fast_pass = fast_pass and self.extract_name_candidate(original[0])
-        enhanced = original if fast_pass else self._read_image(self._enhance(img))
+        enhanced = original if fast_pass else self._read_image(self._enhance(document))
         enhanced_nic = self.extract_nic_candidate(enhanced[0])
         use_enhanced = (enhanced_nic and (prefer_enhanced or not original_nic)) or (not original[0] and enhanced[0])
         lines, _, metadata = enhanced if use_enhanced else original
@@ -109,10 +112,10 @@ class OCREngine:
             metadata["name_candidates"] = (original_name, enhanced_name)
         name = (enhanced_name or original_name) if prefer_enhanced_name else (original_name or enhanced_name)
         nic = self.extract_nic_candidate(lines)
-        field_image = img
-        if not nic or (nic.isdigit() and not name):
-            straight = straighten_card(img)
-            if straight is not img:
+        field_image = document
+        if not detected and (not nic or (nic.isdigit() and not name)):
+            straight = straighten_card(document)
+            if straight is not document:
                 scale = min(3.0, max(1.0, 650 / min(straight.shape[:2])))
                 prepared = cv2.resize(straight, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
                 straight_lines, _, straight_meta = self._read_image(prepared)
@@ -131,17 +134,45 @@ class OCREngine:
         # Crop from the chosen orientation so a sideways phone photo uses
         # the same field coordinates as an upright card.
         oriented = field_image if metadata["rotation"] is None else cv2.rotate(field_image, metadata["rotation"])
-        crop_reads = self._read_nic_region(oriented)
+        number_crop = detected.get("nic_number")
+        if number_crop is not None:
+            crop_reads = self._read_nic_crop(number_crop, metadata["rotation"])
+        else:
+            crop_reads = {} if detected else self._read_nic_region(oriented)
+        full_card_nic = nic
+        if detected and crop_reads:
+            best = next(iter(crop_reads.values()))
+            metadata["detected_nic_confidence"] = best.confidence
+            if best.text != nic:
+                metadata["detected_nic"] = best.text
         if not nic and crop_reads:
             best = next(iter(crop_reads.values()))
             nic = best.text
             lines = [*lines, nic]
             metadata["line_confidences"] = [*metadata["line_confidences"], best.confidence]
-        metadata["recovered_name"] = name
-        metadata["labeled_dob"] = self.extract_labeled_dob(lines) or self.extract_labeled_dob(
+        card_dob = self.extract_labeled_dob(lines) or self.extract_labeled_dob(
             original[0] if use_enhanced else enhanced[0]
         )
-        disagreements = {}
+        name_crop = detected.get("name")
+        dob_crop = detected.get("dob")
+        detected_name = None
+        detected_dob = None
+        crop_warnings = {}
+        if name_crop is not None:
+            rows = self._read_detected_field(name_crop, metadata["rotation"])
+            detected_name = self.extract_name_candidate([row.text for row in rows])
+            if detected_name and self._low_field_confidence(rows):
+                crop_warnings["name"] = "OCR confidence is low or unavailable. Check the name against the card."
+        if dob_crop is not None:
+            rows = self._read_detected_field(dob_crop, metadata["rotation"])
+            detected_dob = self.extract_dob_candidate([row.text for row in rows])
+            if detected_dob and self._low_field_confidence(rows):
+                crop_warnings["dob"] = "OCR confidence is low or unavailable. Check the date against the card."
+        metadata["recovered_name"] = detected_name or name
+        metadata["labeled_dob"] = detected_dob or card_dob
+        if detected:
+            metadata["visual_prediction"] = vision_models.classify(oriented)
+        disagreements = crop_warnings
         for field, pair in {
             "nic": (original_nic, enhanced_nic),
             "name": (original_name, enhanced_name),
@@ -150,7 +181,10 @@ class OCREngine:
             if all(pair) and pair[0].casefold() != pair[1].casefold():
                 disagreements[field] = "OCR passes returned different values. Check this field against the card."
         metadata["field_warnings"] = disagreements
-        candidates = list(dict.fromkeys(value for value in (nic, original_nic, enhanced_nic, *crop_reads) if value))
+        for field, whole, cropped in (("name", name, detected_name), ("dob", card_dob, detected_dob)):
+            if whole and cropped and whole.casefold() != cropped.casefold():
+                disagreements[field] = "OCR passes returned different values. Check this field against the card."
+        candidates = list(dict.fromkeys(value for value in (nic, full_card_nic, original_nic, enhanced_nic, *crop_reads) if value))
         if len(candidates) > 1:
             disagreements["nic"] = "OCR passes returned different values. Check this field against the card."
             metadata["alternate_nic_reads"] = candidates
@@ -177,13 +211,27 @@ class OCREngine:
             crop = image[round(.22 * height):round(.40 * height), round(.17 * width):round(.86 * width)]
         if not crop.size:
             return {}
+        return self._read_nic_crop(crop, None)
 
+    def _read_nic_crop(self, crop, rotation):
+        if rotation is not None:
+            crop = cv2.rotate(crop, rotation)
         reads = {}
         for prepared in (crop, self._enhance(crop)):
             _, rows = self._recognize(prepared, nic_field=True)
             for row in rows:
                 reads.setdefault(row.text, row)
         return reads
+
+    def _read_detected_field(self, crop, rotation):
+        if rotation is not None:
+            crop = cv2.rotate(crop, rotation)
+        _, rows = self._recognize(self._enhance(crop))
+        return rows
+
+    @staticmethod
+    def _low_field_confidence(rows):
+        return any(row.confidence is None or row.confidence < settings.OCR_REVIEW_CONFIDENCE for row in rows)
 
     def _read_modern_name_region(self, img: np.ndarray) -> Optional[str]:
         """Retry the English name area on a straightened landscape card image."""

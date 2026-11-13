@@ -208,8 +208,8 @@ def verify_nic(
     if can_train:
         local_model.remember(request_id, profile, *candidates, ocr_meta.get("name_candidates", (None, None)))
     extracted_name = ocr_meta.get("recovered_name") or ocr_service.extract_name_candidate(ocr_lines)
-    extracted_nic = ocr_service.extract_nic_candidate(ocr_lines)
-    extracted_dob = ocr_service.extract_labeled_dob(ocr_lines) or ocr_meta.get("labeled_dob")
+    extracted_nic = ocr_meta.get("detected_nic") or ocr_service.extract_nic_candidate(ocr_lines)
+    extracted_dob = ocr_meta.get("labeled_dob") or ocr_service.extract_labeled_dob(ocr_lines)
     front_text = " ".join(ocr_lines).casefold()
     front_looks_like_back = "address" in front_text and ("date of issue" in front_text or "commissioner general" in front_text)
     back_looks_like_front = False
@@ -223,7 +223,11 @@ def verify_nic(
             extracted_name = ocr_service.extract_name_candidate(back_lines, require_label=True)
 
     # 4. Conservative Document Classifier
-    classification = classify_sri_lankan_nic(front_bytes, ocr_lines)
+    classification = classify_sri_lankan_nic(
+        front_bytes, ocr_lines,
+        visual_prediction=ocr_meta.get("visual_prediction"),
+        selected_nic=extracted_nic,
+    )
 
     # 5. Extract Candidates from OCR
 
@@ -237,6 +241,10 @@ def verify_nic(
     encoded_dob = nic_validation.decoded_dob if (nic_validation and nic_validation.is_valid) else None
     field_warnings = ocr_meta.get("field_warnings", {})
     scores = ocr_meta.get("line_confidences", [])
+    if "detected_nic_confidence" in ocr_meta:
+        score = ocr_meta["detected_nic_confidence"]
+        if score is None or score < settings.OCR_REVIEW_CONFIDENCE:
+            field_warnings.setdefault("nic", "OCR confidence is low or unavailable. Check the number against the card.")
     if extracted_nic and scores and (
         any(score is None for score in scores) or ocr_conf < settings.OCR_REVIEW_CONFIDENCE
         or any(extracted_nic in "".join(line.upper().split()) and score < settings.OCR_REVIEW_CONFIDENCE

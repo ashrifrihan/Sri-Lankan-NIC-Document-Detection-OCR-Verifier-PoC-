@@ -50,5 +50,7 @@ class Settings(BaseSettings):
     OCR_BACKEND: Literal["auto", "paddle", "tesseract", "windows"] = "auto"
     TESSDATA_PREFIX: str | None = None
     OCR_REVIEW_CONFIDENCE: float = 0.65
+    NIC_DETECTOR_WEIGHTS: str | None = None
+    NIC_CLASSIFIER_WEIGHTS: str | None = None
 
 settings = Settings()

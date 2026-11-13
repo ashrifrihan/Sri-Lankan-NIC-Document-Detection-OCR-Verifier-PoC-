@@ -4,6 +4,7 @@ import numpy as np
 from typing import List, Dict, Any, Tuple
 from ..models.schemas import DocumentClassification, DocumentClassificationType, DocumentCategory
 from .nic_parser import parse_sri_lankan_nic
+from .vision_models import vision_models
 
 # Sri Lanka NIC textual indicators (Latin and script keywords)
 SRI_LANKA_KEYWORDS = [
@@ -84,7 +85,10 @@ def detect_smart_chip_candidate(img_bgr: np.ndarray) -> bool:
 
 def classify_sri_lankan_nic(
     image_bytes: bytes,
-    detected_texts: List[str]
+    detected_texts: List[str],
+    *,
+    visual_prediction: tuple[str, float] | None = None,
+    selected_nic: str | None = None,
 ) -> DocumentClassification:
     """
     Conservative, heuristic-based Sri Lankan NIC document classifier.
@@ -125,7 +129,7 @@ def classify_sri_lankan_nic(
             found_keywords.append(f"Tamil: {tk}")
 
     # Check for valid Sri Lankan NIC numbers in detected text
-    found_valid_nic = False
+    found_valid_nic = bool(selected_nic and parse_sri_lankan_nic(selected_nic).is_valid)
     nic_format_detected = None
 
     # Search for 12-digit NIC
@@ -150,6 +154,31 @@ def classify_sri_lankan_nic(
     ocr_evidence = found_keywords
     signals["keywords_detected"] = found_keywords
     signals["valid_nic_detected"] = found_valid_nic
+
+    prediction = visual_prediction if visual_prediction is not None else vision_models.classify(img_bgr)
+    if prediction is not None:
+        label, confidence = prediction
+        categories = {
+            "old_laminated": DocumentCategory.OLD_LAMINATED,
+            "printed_laminated": DocumentCategory.PRINTED_LAMINATED,
+            "smart_card": DocumentCategory.NEWER_PLASTIC_CARD,
+        }
+        classification = DocumentClassificationType.UNCERTAIN
+        if confidence >= .75:
+            if label == "not_nic" and not found_valid_nic:
+                classification = DocumentClassificationType.NOT_NIC
+            elif label in categories and found_valid_nic:
+                classification = DocumentClassificationType.SRI_LANKAN_NIC
+        signals.update(classifier="mobilenet_v3_small", predicted_class=label)
+        return DocumentClassification(
+            classification=classification,
+            visual_category=categories.get(label, DocumentCategory.UNCERTAIN) if confidence >= .75 else DocumentCategory.UNCERTAIN,
+            confidence=confidence,
+            is_provisional=True,
+            visual_signals=signals,
+            ocr_evidence=ocr_evidence,
+            notes=["Visual type prediction requires human review."],
+        )
 
     # 2. Color and structure distribution
     color_dist = extract_color_distribution(img_bgr)
