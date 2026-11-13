@@ -7,7 +7,7 @@ def get_font(size: int):
         # Standard Windows fonts
         return ImageFont.truetype("arial.ttf", size)
     except Exception:
-        return ImageFont.load_default()
+        return ImageFont.load_default(size=size)
 
 def get_bold_font(size: int):
     try:
@@ -15,7 +15,7 @@ def get_bold_font(size: int):
     except Exception:
         return get_font(size)
 
-def create_synthetic_samples(output_dir: str):
+def create_synthetic_samples(output_dir: str, *, quiet=False):
     os.makedirs(output_dir, exist_ok=True)
     w, h = 856, 540  # Standard ID-1 aspect ratio at 10x scale
 
@@ -109,7 +109,8 @@ def create_synthetic_samples(output_dir: str):
     draw_nn.text((200, 300), "Grocery Store Supermarket", fill=(80, 80, 80), font=font_sub)
     non_nic.save(os.path.join(output_dir, "synthetic_not_nic.png"))
 
-    print(f"Synthetic test samples generated successfully in '{output_dir}'.")
+    if not quiet:
+        print(f"Synthetic test samples generated successfully in '{output_dir}'.")
 
 if __name__ == "__main__":
     create_synthetic_samples("samples")

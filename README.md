@@ -291,7 +291,8 @@ saving any training feedback.
     "front": "photos/synthetic-front.png",
     "card_group": "synthetic-001",
     "split": "test",
-    "cohort": "modern",
+    "card_type": "smart_card",
+    "quality": ["clear"],
     "nic": "199518001234",
     "name": "Nimal Silva"
   }
@@ -299,8 +300,25 @@ saving any training feedback.
 ```
 
 Run `python evaluate_ocr.py PATH_TO_MANIFEST` from the backend folder.
-The report contains correct, wrong, and unread counts per field and cohort.
-Set `printed_dob` only when the birth date is visible on the front photo.
+The JSON report includes counts, normalized exact-match accuracy, and unread
+rate by field, card type, and photo quality. All labeled examples including
+unread photos count toward the denominator. Case and repeated whitespace are
+ignored. Set `printed_dob` only for a birth date printed on the front. If
+`quality` is omitted, the evaluator groups by the app's quality checks.
+An optional `cohort` can track categories such as Sinhala, Tamil, or handwriting.
+NIC digit confusions are aggregate substitutions from same-length reads.
+
+For a CI smoke gate, install the OCR backend and run from `backend`:
+
+```text
+python evaluate_ocr.py --synthetic --min-nic-accuracy 0.80
+```
+
+This generates five synthetic photos in a temporary directory and excludes
+local training preferences. Exit code 1 means measured NIC accuracy is below
+the threshold, and exit code 2 means the invocation or dataset is invalid.
+The 0.80 example is a Windows synthetic baseline. Measure and set a baseline
+for the backend and fonts used by your runner before enforcing the gate there.
 
 ---
 
